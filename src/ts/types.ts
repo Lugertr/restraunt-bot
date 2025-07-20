@@ -1,9 +1,11 @@
 export const enum Step {
-    Department = 0,
+    Preview = 0,
+    Department,
     Dates,
     Stars,
     //Restaurant,
     PageSize,
+    GetData
 }
 
 export type Filters = {
