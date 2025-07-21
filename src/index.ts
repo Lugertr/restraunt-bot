@@ -22,7 +22,6 @@ import {
     clearPrevious,
 } from "./ts/utils";
 
-// Константы и конфигурация
 const { BOT_TOKEN, WEBHOOK_URL, PORT = "3000", API } = process.env;
 if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
 if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL is required");
@@ -43,7 +42,8 @@ const commentsFlowStep = new Map<string, Step>();
 const userPage = new Map<string, number>();
 const userMessages = new Map<string, number[]>();
 
-// Создать файл filters.json, если отсутствует, и загрузить его содержимое
+const commentsCache = new Map<string, Record<string, CommentContainer[]>>();
+
 async function initStorage() {
     await ensureFiltersFile(STORAGE_PATH);
     const data = await readJsonFile<Record<string, Filters>>(STORAGE_PATH);
@@ -114,9 +114,8 @@ async function nextStep(ctx: any) {
                     await ctx.reply(
                         `Текущие фильтры:\nДепартаменты: ${f.department_ids.join(
                             ", "
-                        )}\nДаты: ${f.created_at_after ? "С" + f.created_at_after : ""}:${f.created_at_before ? "До" + f.created_at_before : ""
-                        }\nЗвезды: ${f.stars || "Все"}\nРесторан: ${f.restaurant_id || "Все"
-                        }\nPage size: ${f.page_size}`,
+                        )}\nДаты: ${f.created_at_after ? "С" + f.created_at_after : ""} ${f.created_at_before ? "До" + f.created_at_before : ""}\nЗвезды: ${f.stars || "Все"}\nРесторан: ${f.restaurant_id || "Все"
+                        }\nКоличество отзывов на страницу: ${f.page_size}`,
                         mainKeyboard
                     );
                 }
@@ -132,12 +131,20 @@ async function nextStep(ctx: any) {
                     "depts",
                     fetchDepartments
                 );
+                const f = getOrInitFilters(chatId);
+                const buttons = depts.map((d) => {
+                    const isSel = f.department_ids.includes(String(d.id));
+                    const text = `${isSel ? "✅ " : ""}${d.name}`;
+                    return Markup.button.callback(text, `dept_toggle:${d.id}`);
+                });
+                buttons.push(
+                    Markup.button.callback("✔️ Готово", "dept_done"),
+                    cancelBtn
+                );
                 return sendInlineKeyboard(
                     ctx,
-                    "Шаг 1: Выберите департамент:",
-                    depts
-                        .map((d) => Markup.button.callback(d.name, `dept:${d.id}`))
-                        .concat(cancelBtn)
+                    "Шаг 1: Выберите департамент(ы):",
+                    buttons
                 );
             }
             case Step.Dates:
@@ -155,22 +162,22 @@ async function nextStep(ctx: any) {
                     cancelBtn
                 );
             /*
-                                                      case Step.Restaurant: {
-                                                          const rests = await ensureCache(
-                                                              sessionCache,
-                                                              chatId,
-                                                              "restaurants",
-                                                              fetchRestaurants
-                                                          );
-                                                          return sendInlineKeyboard(
-                                                              ctx,
-                                                              "Шаг 4: Выберите ресторан:",
-                                                              rests
-                                                                  .map((r) => Markup.button.callback(r.name, `rest:${r.id}`))
-                                                                  .concat(skipBtn, cancelBtn)
-                                                          );
-                                                      }
-                                                      */
+                                                                  case Step.Restaurant: {
+                                                                      const rests = await ensureCache(
+                                                                          sessionCache,
+                                                                          chatId,
+                                                                          "restaurants",
+                                                                          fetchRestaurants
+                                                                      );
+                                                                      return sendInlineKeyboard(
+                                                                          ctx,
+                                                                          "Шаг 4: Выберите ресторан:",
+                                                                          rests
+                                                                              .map((r) => Markup.button.callback(r.name, `rest:${r.id}`))
+                                                                              .concat(skipBtn, cancelBtn)
+                                                                      );
+                                                                  }
+                                                                  */
             case Step.PageSize:
                 return sendSkipCancel(
                     ctx,
@@ -180,6 +187,7 @@ async function nextStep(ctx: any) {
                 );
             default:
                 await ctx.reply("Пожалуйста, подождите, получаем отзывы...");
+                await persistFilters();
                 return fetchAndSend(ctx, 1);
         }
     } catch (e) {
@@ -189,71 +197,82 @@ async function nextStep(ctx: any) {
     }
 }
 
-// Получение и вывод комментариев с поддержкой пагинации
 async function fetchAndSend(ctx: any, page: number) {
     const chatId = String(ctx.chat.id);
-    try {
-        await clearPrevious(ctx, userMessages, chatId);
-        userPage.set(chatId, page);
-        const f = getOrInitFilters(chatId);
-        const params: GetCommentsReq = {
-            department_id: f.department_ids.join(","),
-            page: String(page),
-            page_size: f.page_size,
-        };
-        if (f.created_at_after) params.created_at_after = f.created_at_after;
-        if (f.created_at_before) params.created_at_before = f.created_at_before;
-        if (f.stars) params.stars = f.stars.join(",");
-        if (f.restaurant_id) params.restaurant = f.restaurant_id;
-        const cont = await fetchJSON<CommentContainer>(getCommentsUrl(params));
-        const ids: number[] = [];
-        if (!isFilledArray(cont?.results)) {
-            return ctx.reply("Отзывы отсутствуют");
-        }
-        for (const c of cont.results) {
-            const msg = await bot.telegram.sendMessage(
-                chatId,
-                `${c.restaurant.type_comments_loader}\n${"★".repeat(
-                    c.stars
-                )}\nРесторан: ${c.restaurant.name}\nАвтор: ${c.name}\nДата: ${c.created_at.split("T")[0]
-                }\n\n${c.text}`,
-                c.profile_url && c.restaurant.review_url
-                    ? Markup.inlineKeyboard([
-                        Markup.button.url("Отзыв", c.restaurant.review_url),
-                        Markup.button.url("Профиль автора", c.profile_url),
-                    ])
-                    : c.profile_url
-                        ? Markup.inlineKeyboard([
-                            Markup.button.url("Профиль автора", c.profile_url),
-                        ])
-                        : c.restaurant.review_url
-                            ? Markup.inlineKeyboard([
-                                Markup.button.url("Отзыв", c.restaurant.review_url),
-                            ])
-                            : undefined
-            );
-            ids.push(msg.message_id);
-        }
-        const nav: any[] = [];
-        if (page > 1)
-            nav.push(Markup.button.callback("⬅️ Назад", `page:${page - 1}`));
-        if (cont.next)
-            nav.push(Markup.button.callback("Вперед ➡️", `page:${page + 1}`));
-        if (nav.length) {
-            const m = await ctx.reply(
-                `Страница ${page} из ${Math.ceil(cont.count / Number(f.page_size))}`,
-                Markup.inlineKeyboard([nav])
-            );
-            ids.push(m.message_id);
-        }
-        userMessages.set(chatId, ids);
-        f.lastChecked = new Date().toISOString();
-        commentsFlowStep.delete(chatId);
-        await persistFilters();
-    } catch (e) {
-        console.error("fetchAndSend error:", e);
-        await ctx.reply("Не удалось получить отзывы. Попробуйте позже.");
+    const f = getOrInitFilters(chatId);
+    const cacheKey = `page_${page}`;
+
+    let deptContainers = commentsCache.get(chatId)?.[cacheKey];
+    if (!deptContainers) {
+        deptContainers = await Promise.all(
+            f.department_ids.map(async (deptId) => {
+                const params: GetCommentsReq = {
+                    department_id: deptId,
+                    page: String(page),
+                    page_size: f.page_size,
+                    ...(f.created_at_after && { created_at_after: f.created_at_after }),
+                    ...(f.created_at_before && { created_at_before: f.created_at_before }),
+                    ...(f.stars && { stars: f.stars.join(",") }),
+                    ...(f.restaurant_id && { restaurant: f.restaurant_id }),
+                };
+                console.log(params);
+                return fetchJSON<CommentContainer>(getCommentsUrl(params));
+            })
+        );
+        // Сохраняем в кеш
+        if (!commentsCache.has(chatId)) commentsCache.set(chatId, {});
+        commentsCache.get(chatId)![cacheKey] = deptContainers;
     }
+
+    // Объединяем результаты
+    const allResults = deptContainers.flatMap((c) => c.results ?? []);
+    if (!isFilledArray(allResults)) {
+        return ctx.reply("Отзывы отсутствуют");
+    }
+
+    // Очистка предыдущих и отправка новых
+    await clearPrevious(ctx, userMessages, chatId);
+    userPage.set(chatId, page);
+    const sentIds: number[] = [];
+
+    for (const c of allResults) {
+        const msg = await bot.telegram.sendMessage(
+            chatId,
+            `${c.restaurant.type_comments_loader}\n${"★".repeat(c.stars)}\n` +
+            `Ресторан: ${c.restaurant.name}\nАвтор: ${c.name}\nДата: ${c.created_at.split("T")[0]}\n\n` +
+            c.text,
+            c.profile_url || c.restaurant.review_url
+                ? Markup.inlineKeyboard(
+                    [
+                        c.restaurant.review_url &&
+                        Markup.button.url("Отзывы", c.restaurant.review_url),
+                        c.profile_url &&
+                        Markup.button.url("Профиль автора", c.profile_url),
+                    ].filter(Boolean) as any[])
+                : undefined
+        );
+        sentIds.push(msg.message_id);
+    }
+
+    // Навигация
+    const totalCount = deptContainers.reduce((sum, c) => sum + (c.count || 0), 0);
+    const pageCount = Math.ceil(totalCount / Number(f.page_size));
+    const nav: any[] = [];
+    if (page > 1)
+        nav.push(Markup.button.callback("⬅️ Назад", `page:${page - 1}`));
+    if (page < pageCount)
+        nav.push(Markup.button.callback("Вперед ➡️", `page:${page + 1}`));
+    if (nav.length) {
+        const navMsg = await ctx.reply(
+            `Страница ${page} из ${pageCount}`,
+            Markup.inlineKeyboard([nav])
+        );
+        sentIds.push(navMsg.message_id);
+    }
+
+    userMessages.set(chatId, sentIds);
+    f.lastChecked = new Date().toISOString();
+    commentsFlowStep.delete(chatId);
 }
 
 // Команда /comments
@@ -277,7 +296,6 @@ bot.command("comments", async (ctx) => {
 // Команда /filters
 bot.command("filters", async (ctx) => {
     const chatId = String(ctx.chat.id);
-    const f = getOrInitFilters(chatId);
     commentsFlowStep.set(chatId, Step.Preview);
     return nextStep(ctx);
 });
@@ -304,14 +322,32 @@ bot.action("skip", async (ctx) => {
     return nextStep(ctx);
 });
 
-bot.action(/dept:(.+)/, async (ctx) => {
-    if (!isValidNumber(ctx?.chat?.id)) {
-        return ctx.reply("Не удалось получить информацию о пользователе");
-    }
+bot.action(/dept_toggle:(.+)/, async (ctx) => {
     const chatId = String(ctx?.chat?.id);
-    const val = ctx.match[1];
+    const deptId = ctx.match[1];
     const f = getOrInitFilters(chatId);
-    f.department_ids = [val];
+    const idx = f.department_ids.indexOf(deptId);
+    if (idx === -1) {
+        f.department_ids.push(deptId);
+    } else {
+        f.department_ids.splice(idx, 1);
+    }
+
+    await ctx.answerCbQuery();
+
+    if (ctx.callbackQuery?.message?.message_id) {
+        await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
+    }
+    return nextStep(ctx);
+});
+
+bot.action("dept_done", async (ctx) => {
+    const chatId = String(ctx?.chat?.id);
+    const f = getOrInitFilters(chatId);
+    const idx = f.department_ids;
+    if (!isFilledArray(idx)) {
+        return ctx.reply("Выберите хотя бы один департамент!");
+    }
     await ctx.answerCbQuery();
     commentsFlowStep.set(chatId, Step.Dates);
     return nextStep(ctx);
@@ -429,7 +465,6 @@ setInterval(async () => {
             console.error("Polling error for", chatId, e);
         }
     }
-    await persistFilters();
 }, CHECK_INTERVAL);
 
 // Запуск webhook и бота
