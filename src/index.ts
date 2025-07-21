@@ -10,6 +10,7 @@ import {
     Filters,
     Step,
     CommentContainer,
+    GetCommentsReq,
 } from "./ts/types";
 import {
     ensureFiltersFile,
@@ -79,8 +80,11 @@ const fetchDepartments = () =>
     fetchJSON<Department[]>(`${API_BASE}/departments/`);
 const fetchRestaurants = () =>
     fetchJSON<Restaurant[]>(`${API_BASE}/restaurants/`);
-function buildCommentQuery(params: Record<string, string>) {
-    return `${API_BASE}/comments/?${new URLSearchParams(params)}`;
+function getCommentsUrl(params: GetCommentsReq) {
+    //TO DO FIX TYPES
+    return `${API_BASE}/comments/?${new URLSearchParams(
+        params as unknown as Record<string, string>
+    )}`;
 }
 
 // Основные клавиатуры
@@ -151,26 +155,26 @@ async function nextStep(ctx: any) {
                     cancelBtn
                 );
             /*
-                                                case Step.Restaurant: {
-                                                    const rests = await ensureCache(
-                                                        sessionCache,
-                                                        chatId,
-                                                        "restaurants",
-                                                        fetchRestaurants
-                                                    );
-                                                    return sendInlineKeyboard(
-                                                        ctx,
-                                                        "Шаг 4: Выберите ресторан:",
-                                                        rests
-                                                            .map((r) => Markup.button.callback(r.name, `rest:${r.id}`))
-                                                            .concat(skipBtn, cancelBtn)
-                                                    );
-                                                }
-                                                */
+                                                      case Step.Restaurant: {
+                                                          const rests = await ensureCache(
+                                                              sessionCache,
+                                                              chatId,
+                                                              "restaurants",
+                                                              fetchRestaurants
+                                                          );
+                                                          return sendInlineKeyboard(
+                                                              ctx,
+                                                              "Шаг 4: Выберите ресторан:",
+                                                              rests
+                                                                  .map((r) => Markup.button.callback(r.name, `rest:${r.id}`))
+                                                                  .concat(skipBtn, cancelBtn)
+                                                          );
+                                                      }
+                                                      */
             case Step.PageSize:
                 return sendSkipCancel(
                     ctx,
-                    "Шаг 4: Введите количество выводимых отзывов на страницу",
+                    "Шаг 4: Введите количество выводимых отзывов на страницу (по умолчанию 5)",
                     skipBtn,
                     cancelBtn
                 );
@@ -192,16 +196,16 @@ async function fetchAndSend(ctx: any, page: number) {
         await clearPrevious(ctx, userMessages, chatId);
         userPage.set(chatId, page);
         const f = getOrInitFilters(chatId);
-        const params: Record<string, string> = {
-            department_id: f.department_ids[0],
+        const params: GetCommentsReq = {
+            department_id: f.department_ids.join(","),
             page: String(page),
             page_size: f.page_size,
         };
         if (f.created_at_after) params.created_at_after = f.created_at_after;
         if (f.created_at_before) params.created_at_before = f.created_at_before;
-        if (f.stars) params.stars = f.stars;
+        if (f.stars) params.stars = f.stars.join(",");
         if (f.restaurant_id) params.restaurant = f.restaurant_id;
-        const cont = await fetchJSON<CommentContainer>(buildCommentQuery(params));
+        const cont = await fetchJSON<CommentContainer>(getCommentsUrl(params));
         const ids: number[] = [];
         if (!isFilledArray(cont?.results)) {
             return ctx.reply("Отзывы отсутствуют");
@@ -326,9 +330,9 @@ bot.action(/rest:(\d+)/, async (ctx) => {
     return nextStep(ctx);
 });
 
-bot.start(async ctx => {
-    await ctx.reply('Добро пожаловать!', mainKeyboard);
-    await ctx.reply('Введите /comments чтобы увидеть отзывы', mainKeyboard);
+bot.start(async (ctx) => {
+    await ctx.reply("Добро пожаловать!", mainKeyboard);
+    await ctx.reply("Введите /comments чтобы увидеть отзывы", mainKeyboard);
 });
 
 bot.on("text", async (ctx) => {
@@ -356,11 +360,25 @@ bot.on("text", async (ctx) => {
         }
     }
     if (step === Step.Stars) {
-        const m = text.match(/^(\d)(?:-(\d))?$/);
-        if (m) {
-            f.stars = m[1];
+        const m = text.match(/^([1-5])(?:-([1-5]))?$/);
+        if (!m) {
+            return ctx.reply(
+                "Неверный формат. Введите число от 1 до 5 в формате X-Y\n" +
+                "где X и Y — числа от 1 до 5 и X < Y."
+            );
+        }
+
+        const a = Number(m[1]);
+        const b = m[2] !== undefined ? Number(m[2]) : null;
+
+        if (b === null) {
+            f.stars = [String(a)];
+        } else if (a < b) {
+            f.stars = [String(a), String(b)];
         } else {
-            return ctx.reply("Необходимо ввести число от 1 до 5!");
+            return ctx.reply(
+                `Неверный диапазон: первое число (${a}) должно быть меньше второго (${b}).`
+            );
         }
     }
     if (step === Step.PageSize) {
@@ -384,13 +402,13 @@ bot.action(/page:(\d+)/, async (ctx) => {
 setInterval(async () => {
     for (const [chatId, f] of userFilters.entries()) {
         try {
-            const params: Record<string, string> = {
+            const params: GetCommentsReq = {
                 department_id: f.department_ids.join(","),
                 page: "1",
                 page_size: f.page_size,
                 created_at_after: formatDateLocal(new Date(f.lastChecked)),
             };
-            const cont = await fetchJSON<CommentContainer>(buildCommentQuery(params));
+            const cont = await fetchJSON<CommentContainer>(getCommentsUrl(params));
             for (const c of cont.results) {
                 await bot.telegram.sendMessage(
                     chatId,

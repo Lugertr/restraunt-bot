@@ -13,7 +13,7 @@ export type Filters = {
     restaurant_id?: string;
     created_at_after?: string;
     created_at_before?: string;
-    stars?: string;
+    stars?: string[];
     page_size: string;
     lastChecked: string;
 };
@@ -38,9 +38,19 @@ export type CommentContainer = {
 export interface Restaurant {
     id: number;
     restaurant_id: string;
-    type_comments_loader: string; 
+    type_comments_loader: string;
     department: string;
     rating: number;
     name: string;
     review_url: string;
+}
+
+export interface GetCommentsReq {
+    department_id: string;
+    page: string;
+    page_size: string;
+    created_at_after?: string;
+    created_at_before?: string;
+    stars?: string;
+    restaurant?: string;
 }
