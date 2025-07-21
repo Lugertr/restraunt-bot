@@ -8,7 +8,7 @@ export const enum Step {
     GetData
 }
 
-export type Filters = {
+export type Settings = {
     department_ids: string[];
     restaurant_id?: string;
     created_at_after?: string;

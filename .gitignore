@@ -1,4 +1,4 @@
 /.env.development
 /.env.production
 /node_modules
-/filters.json
+/settings.json

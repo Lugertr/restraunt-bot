@@ -66,15 +66,14 @@ export async function clearPrevious(
     }
 }
 
-// Убедиться, что файл filters.json существует, иначе создать пустой
-export async function ensureFiltersFile(filePath: string) {
+export async function ensureSettingsFile(filePath: string) {
     try {
         await fs.access(filePath);
     } catch {
         try {
             await fs.writeFile(filePath, JSON.stringify({}, null, 2));
         } catch (e) {
-            console.error("Ошибка ensureFiltersFile:", e);
+            console.error("Ошибка ensureSettingsFile:", e);
         }
     }
 }

@@ -7,13 +7,13 @@ import { formatDateLocal, isFilledArray, isValidNumber } from "./ts/helpers";
 import {
     Department,
     Restaurant,
-    Filters,
+    Settings,
     Step,
     CommentContainer,
     GetCommentsReq,
 } from "./ts/types";
 import {
-    ensureFiltersFile,
+    ensureSettingsFile,
     readJsonFile,
     writeJsonFile,
     ensureCache,
@@ -27,7 +27,7 @@ if (!BOT_TOKEN) throw new Error("BOT_TOKEN is required");
 if (!WEBHOOK_URL) throw new Error("WEBHOOK_URL is required");
 if (!API) throw new Error("API is required");
 const API_BASE = API;
-const STORAGE_PATH = path.resolve(process.cwd(), "filters.json");
+const STORAGE_PATH = path.resolve(process.cwd(), "settings.json");
 const PORT_NUM = Number(PORT);
 const CHECK_INTERVAL = 3_600_000;
 const DEFAULT_PAGE_SIZE = 5;
@@ -37,7 +37,7 @@ const sessionCache = new Map<
     string,
     { depts?: Department[]; restaurants?: Restaurant[] }
 >();
-const userFilters = new Map<string, Filters>();
+const userSettings = new Map<string, Settings>();
 const commentsFlowStep = new Map<string, Step>();
 const userPage = new Map<string, number>();
 const userMessages = new Map<string, number[]>();
@@ -45,27 +45,27 @@ const userMessages = new Map<string, number[]>();
 const commentsCache = new Map<string, Record<string, CommentContainer[]>>();
 
 async function initStorage() {
-    await ensureFiltersFile(STORAGE_PATH);
-    const data = await readJsonFile<Record<string, Filters>>(STORAGE_PATH);
-    Object.entries(data).forEach(([chatId, f]) => userFilters.set(chatId, f));
+    await ensureSettingsFile(STORAGE_PATH);
+    const data = await readJsonFile<Record<string, Settings>>(STORAGE_PATH);
+    Object.entries(data).forEach(([chatId, f]) => userSettings.set(chatId, f));
 }
-// Сохранить userFilters в файл
-async function persistFilters() {
-    const obj: Record<string, Filters> = {};
-    userFilters.forEach((f, chatId) => (obj[chatId] = f));
+// Сохранить userSettings в файл
+async function persistSettings() {
+    const obj: Record<string, Settings> = {};
+    userSettings.forEach((f, chatId) => (obj[chatId] = f));
     await writeJsonFile(STORAGE_PATH, obj);
 }
 
 // Получить или инициализировать фильтры для chatId
-function getOrInitFilters(chatId: string): Filters {
-    let f = userFilters.get(chatId);
+function getOrInitSettings(chatId: string): Settings {
+    let f = userSettings.get(chatId);
     if (!f) {
         f = {
             department_ids: [],
             page_size: String(DEFAULT_PAGE_SIZE),
             lastChecked: new Date(0).toISOString(),
         };
-        userFilters.set(chatId, f);
+        userSettings.set(chatId, f);
     }
     return f;
 }
@@ -90,7 +90,7 @@ function getCommentsUrl(params: GetCommentsReq) {
 // Основные клавиатуры
 const mainKeyboard = Markup.keyboard([
     ["/comments — Показать отзывы"],
-    ["/filters — Показать или изменить фильтры"],
+    ["/settings — Показать или изменить фильтры"],
 ]).resize();
 
 const cancelBtn = Markup.button.callback("❌ Отмена", "cancel");
@@ -109,7 +109,7 @@ async function nextStep(ctx: any) {
     try {
         switch (step) {
             case Step.Preview: {
-                const f = getOrInitFilters(chatId);
+                const f = getOrInitSettings(chatId);
                 if (isFilledArray(f.department_ids)) {
                     await ctx.reply(
                         `Текущие фильтры:\nДепартаменты: ${f.department_ids.join(
@@ -131,7 +131,7 @@ async function nextStep(ctx: any) {
                     "depts",
                     fetchDepartments
                 );
-                const f = getOrInitFilters(chatId);
+                const f = getOrInitSettings(chatId);
                 const buttons = depts.map((d) => {
                     const isSel = f.department_ids.includes(String(d.id));
                     const text = `${isSel ? "✅ " : ""}${d.name}`;
@@ -187,7 +187,7 @@ async function nextStep(ctx: any) {
                 );
             default:
                 await ctx.reply("Пожалуйста, подождите, получаем отзывы...");
-                await persistFilters();
+                await persistSettings();
                 return fetchAndSend(ctx, 1);
         }
     } catch (e) {
@@ -199,7 +199,7 @@ async function nextStep(ctx: any) {
 
 async function fetchAndSend(ctx: any, page: number) {
     const chatId = String(ctx.chat.id);
-    const f = getOrInitFilters(chatId);
+    const f = getOrInitSettings(chatId);
     const cacheKey = `page_${page}`;
 
     let deptContainers = commentsCache.get(chatId)?.[cacheKey];
@@ -278,7 +278,7 @@ async function fetchAndSend(ctx: any, page: number) {
 // Команда /comments
 bot.command("comments", async (ctx) => {
     const chatId = String(ctx.chat.id);
-    const f = getOrInitFilters(chatId);
+    const f = getOrInitSettings(chatId);
     if (isFilledArray(f.department_ids)) {
         await ctx.reply(
             `Текущие фильтры:\nДепартаменты: ${f.department_ids.join(", ")}\nДаты: ${f.created_at_after ? "С" + f.created_at_after : ""
@@ -293,8 +293,8 @@ bot.command("comments", async (ctx) => {
     return nextStep(ctx);
 });
 
-// Команда /filters
-bot.command("filters", async (ctx) => {
+// Команда /settings
+bot.command("settings", async (ctx) => {
     const chatId = String(ctx.chat.id);
     commentsFlowStep.set(chatId, Step.Preview);
     return nextStep(ctx);
@@ -325,7 +325,7 @@ bot.action("skip", async (ctx) => {
 bot.action(/dept_toggle:(.+)/, async (ctx) => {
     const chatId = String(ctx?.chat?.id);
     const deptId = ctx.match[1];
-    const f = getOrInitFilters(chatId);
+    const f = getOrInitSettings(chatId);
     const idx = f.department_ids.indexOf(deptId);
     if (idx === -1) {
         f.department_ids.push(deptId);
@@ -343,7 +343,7 @@ bot.action(/dept_toggle:(.+)/, async (ctx) => {
 
 bot.action("dept_done", async (ctx) => {
     const chatId = String(ctx?.chat?.id);
-    const f = getOrInitFilters(chatId);
+    const f = getOrInitSettings(chatId);
     const idx = f.department_ids;
     if (!isFilledArray(idx)) {
         return ctx.reply("Выберите хотя бы один департамент!");
@@ -359,7 +359,7 @@ bot.action(/rest:(\d+)/, async (ctx) => {
     }
     const chatId = String(ctx?.chat?.id);
     const val = ctx.match[1];
-    const f = getOrInitFilters(chatId);
+    const f = getOrInitSettings(chatId);
     f.restaurant_id = val;
     await ctx.answerCbQuery();
     commentsFlowStep.set(chatId, Step.PageSize);
@@ -376,7 +376,7 @@ bot.on("text", async (ctx) => {
     const step = commentsFlowStep.get(chatId);
     if (step === undefined || step === Step.Department || step === Step.Preview)
         return;
-    const f = getOrInitFilters(chatId);
+    const f = getOrInitSettings(chatId);
     const text = ctx.message.text.trim();
     if (step === Step.Dates) {
         const m = text.match(/^(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
@@ -436,7 +436,7 @@ bot.action(/page:(\d+)/, async (ctx) => {
 
 // Периодическое получение новых комментариев
 setInterval(async () => {
-    for (const [chatId, f] of userFilters.entries()) {
+    for (const [chatId, f] of userSettings.entries()) {
         try {
             const params: GetCommentsReq = {
                 department_id: f.department_ids.join(","),
