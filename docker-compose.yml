@@ -3,7 +3,7 @@ services:
   bot:
     build: .
     container_name: restaurant-bot
-    env_file: .env 
+    env_file: .env.production
     environment:
       - NODE_ENV=production
     restart: unless-stopped
