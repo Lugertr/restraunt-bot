@@ -5,6 +5,7 @@ export const enum Step {
     Stars,
     //Restaurant,
     PageSize,
+    Subscription,
     GetData
 }
 
@@ -16,6 +17,8 @@ export type Settings = {
     stars?: string[];
     page_size: string;
     lastChecked: string;
+    subscribed: boolean;
+    isValChanges?: boolean
 };
 
 export type Department = { id: string; name: string };

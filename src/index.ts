@@ -42,7 +42,7 @@ const commentsFlowStep = new Map<string, Step>();
 const userPage = new Map<string, number>();
 const userMessages = new Map<string, number[]>();
 
-const commentsCache = new Map<string, Record<string, CommentContainer[]>>();
+const commentsCache = new Map<string, Record<string, CommentContainer>>();
 
 async function initStorage() {
     await ensureSettingsFile(STORAGE_PATH);
@@ -64,33 +64,47 @@ function getOrInitSettings(chatId: string): Settings {
             department_ids: [],
             page_size: String(DEFAULT_PAGE_SIZE),
             lastChecked: new Date(0).toISOString(),
+            subscribed: false,
         };
         userSettings.set(chatId, f);
     }
     return f;
 }
 
-// Утилита для простого fetch
-async function fetchJSON<T>(url: string): Promise<T> {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
-    return res.json();
+async function fetchJSON<T>(url: string): Promise<T | null> {
+    try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status} ${url}`);
+        return res.json();
+    } catch (error) {
+        console.error(`Failed to fetch ${url}`, error);
+        return null;
+    }
 }
 const fetchDepartments = () =>
     fetchJSON<Department[]>(`${API_BASE}/departments/`);
 const fetchRestaurants = () =>
     fetchJSON<Restaurant[]>(`${API_BASE}/restaurants/`);
-function getCommentsUrl(params: GetCommentsReq) {
+function getCommentsUrl(params: string) {
     //TO DO FIX TYPES
-    return `${API_BASE}/comments/?${new URLSearchParams(
-        params as unknown as Record<string, string>
-    )}`;
+    return `${API_BASE}/comments/?${params}`;
+}
+
+function formatSettingsSummary(s: Settings): string {
+    return [
+        `Департаменты: ${s.department_ids.join(", ") || "Все"}`,
+        `Даты: ${s.created_at_after ? "С" + s.created_at_after : ""}${s.created_at_before ? " До" + s.created_at_before : ""
+            }`.trim(),
+        `Звезды: ${s.stars?.join("-") || "Все"}`,
+        `Ресторан: ${s.restaurant_id || "Все"}`,
+        `Количество отзывов на отдельный департамент: ${s.page_size}`,
+    ].join("\n");
 }
 
 // Основные клавиатуры
 const mainKeyboard = Markup.keyboard([
     ["/comments — Показать отзывы"],
-    ["/settings — Показать или изменить фильтры"],
+    ["/settings — Показать или изменить настройки"],
 ]).resize();
 
 const cancelBtn = Markup.button.callback("❌ Отмена", "cancel");
@@ -109,31 +123,49 @@ async function nextStep(ctx: any) {
     try {
         switch (step) {
             case Step.Preview: {
-                const f = getOrInitSettings(chatId);
-                if (isFilledArray(f.department_ids)) {
+                const s = getOrInitSettings(chatId);
+                let subscribeBtn = s.subscribed
+                    ? Markup.button.callback(
+                        "Отписаться от новых отзывов",
+                        "toggle_subscribe"
+                    )
+                    : Markup.button.callback(
+                        "Подписаться на новые отзывы",
+                        "toggle_subscribe"
+                    );
+                if (isFilledArray(s.department_ids)) {
                     await ctx.reply(
-                        `Текущие фильтры:\nДепартаменты: ${f.department_ids.join(
-                            ", "
-                        )}\nДаты: ${f.created_at_after ? "С" + f.created_at_after : ""} ${f.created_at_before ? "До" + f.created_at_before : ""}\nЗвезды: ${f.stars || "Все"}\nРесторан: ${f.restaurant_id || "Все"
-                        }\nКоличество отзывов на страницу: ${f.page_size}`,
+                        `Текущие настройки:\n${formatSettingsSummary(s)}`,
                         mainKeyboard
                     );
+                    return sendInlineKeyboard(ctx, "Изменить настройки?", [
+                        Markup.button.callback("Да", "skip"),
+                        subscribeBtn,
+                        Markup.button.callback("❌ Отмена", "cancel"),
+                    ]);
+                } else {
+                    return sendInlineKeyboard(
+                        ctx,
+                        "Настройте нужные параметры для просмотра отзывов",
+                        [
+                            Markup.button.callback("Начать настройку", "skip"),
+                            Markup.button.callback("❌ Отмена", "cancel"),
+                        ]
+                    );
                 }
-                return sendInlineKeyboard(ctx, "Настроить фильтры?", [
-                    Markup.button.callback("Да", "skip"),
-                    cancelBtn,
-                ]);
             }
             case Step.Department: {
-                const depts = await ensureCache(
-                    sessionCache,
-                    chatId,
-                    "depts",
-                    fetchDepartments
-                );
-                const f = getOrInitSettings(chatId);
+                const depts =
+                    (await ensureCache(
+                        sessionCache,
+                        chatId,
+                        "depts",
+                        fetchDepartments
+                    )) || [];
+                const s = getOrInitSettings(chatId);
+                s.isValChanges = false;
                 const buttons = depts.map((d) => {
-                    const isSel = f.department_ids.includes(String(d.id));
+                    const isSel = s.department_ids.includes(String(d.id));
                     const text = `${isSel ? "✅ " : ""}${d.name}`;
                     return Markup.button.callback(text, `dept_toggle:${d.id}`);
                 });
@@ -157,35 +189,32 @@ async function nextStep(ctx: any) {
             case Step.Stars:
                 return sendSkipCancel(
                     ctx,
-                    "Шаг 3: Пропустите шаг или введите количество звезд, поставленных пользователем, одним числом от 1 до 5",
+                    "Шаг 3: Пропустите шаг или введите количество звезд, поставленных пользователем, одним числом или двумя, например 1-4 (звезды могут быть от 1 до 5)",
                     skipBtn,
                     cancelBtn
                 );
-            /*
-                                                                  case Step.Restaurant: {
-                                                                      const rests = await ensureCache(
-                                                                          sessionCache,
-                                                                          chatId,
-                                                                          "restaurants",
-                                                                          fetchRestaurants
-                                                                      );
-                                                                      return sendInlineKeyboard(
-                                                                          ctx,
-                                                                          "Шаг 4: Выберите ресторан:",
-                                                                          rests
-                                                                              .map((r) => Markup.button.callback(r.name, `rest:${r.id}`))
-                                                                              .concat(skipBtn, cancelBtn)
-                                                                      );
-                                                                  }
-                                                                  */
             case Step.PageSize:
                 return sendSkipCancel(
                     ctx,
-                    "Шаг 4: Введите количество выводимых отзывов на страницу (по умолчанию 5)",
+                    "Шаг 4: Введите количество выводимых отзывов по отдельному департаменту на страницу (по умолчанию 5)",
                     skipBtn,
                     cancelBtn
                 );
+            case Step.Subscription:
+                const s = getOrInitSettings(chatId);
+                if (!s.isValChanges) {
+                    return sendInlineKeyboard(
+                        ctx,
+                        "Хотите подписаться на новые отзывы?",
+                        [
+                            Markup.button.callback("Да, подписаться", "subscribe_save"),
+                            Markup.button.callback("Нет", "nosub"),
+                        ]
+                    );
+                }
             default:
+                const set = getOrInitSettings(chatId);
+                delete set.isValChanges;
                 await ctx.reply("Пожалуйста, подождите, получаем отзывы...");
                 await persistSettings();
                 return fetchAndSend(ctx, 1);
@@ -197,93 +226,104 @@ async function nextStep(ctx: any) {
     }
 }
 
-async function fetchAndSend(ctx: any, page: number) {
+async function fetchAndSend(ctx: any, page: number, isIntervalReq?: boolean) {
     const chatId = String(ctx.chat.id);
-    const f = getOrInitSettings(chatId);
-    const cacheKey = `page_${page}`;
+    const s = getOrInitSettings(chatId);
+    let cacheContainer = commentsCache.get(chatId);
+    if (!cacheContainer) {
+        cacheContainer = {};
+        commentsCache.set(chatId, cacheContainer);
+    }
 
-    let deptContainers = commentsCache.get(chatId)?.[cacheKey];
-    if (!deptContainers) {
-        deptContainers = await Promise.all(
-            f.department_ids.map(async (deptId) => {
+    const containers = (
+        await Promise.all(
+            s.department_ids.map(async (deptId) => {
+                const dateData = {
+                    ...(!isIntervalReq
+                        ? s.created_at_before && {
+                            created_at_before: s.created_at_before,
+                            ...(s.created_at_after && {
+                                created_at_after: s.created_at_after,
+                            }),
+                        }
+                        : {
+                            created_at_after: formatDateLocal(new Date(s.lastChecked)),
+                        }),
+                };
                 const params: GetCommentsReq = {
                     department_id: deptId,
                     page: String(page),
-                    page_size: f.page_size,
-                    ...(f.created_at_after && { created_at_after: f.created_at_after }),
-                    ...(f.created_at_before && { created_at_before: f.created_at_before }),
-                    ...(f.stars && { stars: f.stars.join(",") }),
-                    ...(f.restaurant_id && { restaurant: f.restaurant_id }),
+                    page_size: s.page_size,
+                    ...dateData,
+                    ...(s.stars && { stars: s.stars.join(",") }),
+                    ...(s.restaurant_id && { restaurant: s.restaurant_id }),
                 };
-                console.log(params);
-                return fetchJSON<CommentContainer>(getCommentsUrl(params));
+                const urlParams = `${new URLSearchParams(
+                    params as unknown as Record<string, string>
+                )}`;
+                const existingData = cacheContainer[urlParams];
+                if (existingData) {
+                    return existingData;
+                }
+                const result = await fetchJSON<CommentContainer>(
+                    getCommentsUrl(urlParams)
+                );
+                if (result) {
+                    cacheContainer[urlParams] = result;
+                }
+                return result;
             })
-        );
-        // Сохраняем в кеш
-        if (!commentsCache.has(chatId)) commentsCache.set(chatId, {});
-        commentsCache.get(chatId)![cacheKey] = deptContainers;
-    }
-
-    // Объединяем результаты
-    const allResults = deptContainers.flatMap((c) => c.results ?? []);
-    if (!isFilledArray(allResults)) {
-        return ctx.reply("Отзывы отсутствуют");
-    }
-
-    // Очистка предыдущих и отправка новых
+        )
+    ).filter(Boolean) as CommentContainer[];
+    const results = containers.flatMap((c) => c.results || []);
+    if (!isFilledArray(results)) return ctx.reply("Нет отзывов");
     await clearPrevious(ctx, userMessages, chatId);
     userPage.set(chatId, page);
-    const sentIds: number[] = [];
-
-    for (const c of allResults) {
+    const sent: number[] = [];
+    for (const c of results) {
         const msg = await bot.telegram.sendMessage(
             chatId,
             `${c.restaurant.type_comments_loader}\n${"★".repeat(c.stars)}\n` +
-            `Ресторан: ${c.restaurant.name}\nАвтор: ${c.name}\nДата: ${c.created_at.split("T")[0]}\n\n` +
+            `Ресторан: ${c.restaurant.name}\nАвтор: ${c.name}\nДата: ${c.created_at.split("T")[0]
+            }\n\n` +
             c.text,
-            c.profile_url || c.restaurant.review_url
-                ? Markup.inlineKeyboard(
-                    [
-                        c.restaurant.review_url &&
-                        Markup.button.url("Отзывы", c.restaurant.review_url),
-                        c.profile_url &&
-                        Markup.button.url("Профиль автора", c.profile_url),
-                    ].filter(Boolean) as any[])
+            c.profile_url
+                ? Markup.inlineKeyboard([
+                    Markup.button.url("Отзывы", c.restaurant.review_url),
+                    Markup.button.url("Профиль", c.profile_url),
+                ])
                 : undefined
         );
-        sentIds.push(msg.message_id);
+        sent.push(msg.message_id);
     }
-
-    // Навигация
-    const totalCount = deptContainers.reduce((sum, c) => sum + (c.count || 0), 0);
-    const pageCount = Math.ceil(totalCount / Number(f.page_size));
-    const nav: any[] = [];
-    if (page > 1)
-        nav.push(Markup.button.callback("⬅️ Назад", `page:${page - 1}`));
-    if (page < pageCount)
-        nav.push(Markup.button.callback("Вперед ➡️", `page:${page + 1}`));
+    const pages = Math.max(
+        ...containers.map((c) => Math.ceil(c.count / Number(s.page_size)))
+    );
+    const nav = [];
+    console.log(pages);
+    console.log(containers);
+    if (page > 1) nav.push(Markup.button.callback("⬅️", `page:${page - 1}`));
+    if (page < pages) nav.push(Markup.button.callback("➡️", `page:${page + 1}`));
     if (nav.length) {
         const navMsg = await ctx.reply(
-            `Страница ${page} из ${pageCount}`,
+            `Страница ${page}/${pages}`,
             Markup.inlineKeyboard([nav])
         );
-        sentIds.push(navMsg.message_id);
+        sent.push(navMsg.message_id);
     }
-
-    userMessages.set(chatId, sentIds);
-    f.lastChecked = new Date().toISOString();
+    userMessages.set(chatId, sent);
+    s.lastChecked = new Date().toISOString();
     commentsFlowStep.delete(chatId);
+    persistSettings();
 }
 
 // Команда /comments
 bot.command("comments", async (ctx) => {
     const chatId = String(ctx.chat.id);
-    const f = getOrInitSettings(chatId);
-    if (isFilledArray(f.department_ids)) {
+    const s = getOrInitSettings(chatId);
+    if (isFilledArray(s.department_ids)) {
         await ctx.reply(
-            `Текущие фильтры:\nДепартаменты: ${f.department_ids.join(", ")}\nДаты: ${f.created_at_after ? "С" + f.created_at_after : ""
-            } ${f.created_at_before ? "До" + f.created_at_before : ""}\nЗвезды: ${f.stars || "Все"
-            }\nРесторан: ${f.restaurant_id || "Все"}\nPage size: ${f.page_size}`,
+            `Текущие фильтры:\n${formatSettingsSummary(s)}`,
             mainKeyboard
         );
         commentsFlowStep.set(chatId, Step.GetData);
@@ -325,12 +365,12 @@ bot.action("skip", async (ctx) => {
 bot.action(/dept_toggle:(.+)/, async (ctx) => {
     const chatId = String(ctx?.chat?.id);
     const deptId = ctx.match[1];
-    const f = getOrInitSettings(chatId);
-    const idx = f.department_ids.indexOf(deptId);
+    const s = getOrInitSettings(chatId);
+    const idx = s.department_ids.indexOf(deptId);
     if (idx === -1) {
-        f.department_ids.push(deptId);
+        s.department_ids.push(deptId);
     } else {
-        f.department_ids.splice(idx, 1);
+        s.department_ids.splice(idx, 1);
     }
 
     await ctx.answerCbQuery();
@@ -338,13 +378,14 @@ bot.action(/dept_toggle:(.+)/, async (ctx) => {
     if (ctx.callbackQuery?.message?.message_id) {
         await ctx.deleteMessage(ctx.callbackQuery.message.message_id);
     }
+    s.isValChanges = true;
     return nextStep(ctx);
 });
 
 bot.action("dept_done", async (ctx) => {
     const chatId = String(ctx?.chat?.id);
-    const f = getOrInitSettings(chatId);
-    const idx = f.department_ids;
+    const s = getOrInitSettings(chatId);
+    const idx = s.department_ids;
     if (!isFilledArray(idx)) {
         return ctx.reply("Выберите хотя бы один департамент!");
     }
@@ -353,17 +394,35 @@ bot.action("dept_done", async (ctx) => {
     return nextStep(ctx);
 });
 
-bot.action(/rest:(\d+)/, async (ctx) => {
-    if (!isValidNumber(ctx?.chat?.id)) {
-        return ctx.reply("Не удалось получить информацию о пользователе");
-    }
-    const chatId = String(ctx?.chat?.id);
-    const val = ctx.match[1];
-    const f = getOrInitSettings(chatId);
-    f.restaurant_id = val;
-    await ctx.answerCbQuery();
-    commentsFlowStep.set(chatId, Step.PageSize);
+bot.action("toggle_subscribe", async (ctx) => {
+    const chatId = String(ctx.chat?.id);
+    const s = getOrInitSettings(chatId);
+    s.subscribed = !s.subscribed;
+    await persistSettings();
+    await ctx.answerCbQuery(
+        s.subscribed ? "Подписка включена" : "Подписка выключена"
+    );
+    return ctx.reply(
+        s.subscribed ? "Вы подписаны!" : "Вы отписаны.",
+        mainKeyboard
+    );
+});
+
+bot.action("subscribe_save", async (ctx) => {
+    const chatId = String(ctx.chat?.id);
+    const s = getOrInitSettings(chatId);
+    s.subscribed = true;
+    await ctx.answerCbQuery("Подписка сохранена");
+    await ctx.reply("Готово! Настройки и подписка сохранены.", mainKeyboard);
+    const step = commentsFlowStep.get(chatId);
+    commentsFlowStep.set(chatId, step! + 1);
     return nextStep(ctx);
+});
+
+bot.action("nosub", async (ctx) => {
+    await ctx.answerCbQuery();
+    await ctx.reply("Настройки сохранены без подписки.", mainKeyboard);
+    return persistSettings();
 });
 
 bot.start(async (ctx) => {
@@ -376,20 +435,20 @@ bot.on("text", async (ctx) => {
     const step = commentsFlowStep.get(chatId);
     if (step === undefined || step === Step.Department || step === Step.Preview)
         return;
-    const f = getOrInitSettings(chatId);
+    const s = getOrInitSettings(chatId);
     const text = ctx.message.text.trim();
     if (step === Step.Dates) {
         const m = text.match(/^(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/);
         if (m) {
-            f.created_at_after = m[1];
-            f.created_at_before = m[2];
+            s.created_at_after = m[1];
+            s.created_at_before = m[2];
         } else {
             const m1 = text.match(/^(\d{4}-\d{2}-\d{2})$/);
             const m2 = text.match(/^:(\d{4}-\d{2}-\d{2})$/);
             if (m1) {
-                f.created_at_after = m1[1];
+                s.created_at_after = m1[1];
             } else if (m2) {
-                f.created_at_before = m2[1];
+                s.created_at_before = m2[1];
             } else {
                 return ctx.reply("Неверный формат даты!");
             }
@@ -408,9 +467,9 @@ bot.on("text", async (ctx) => {
         const b = m[2] !== undefined ? Number(m[2]) : null;
 
         if (b === null) {
-            f.stars = [String(a)];
+            s.stars = [String(a)];
         } else if (a < b) {
-            f.stars = [String(a), String(b)];
+            s.stars = [String(a), String(b)];
         } else {
             return ctx.reply(
                 `Неверный диапазон: первое число (${a}) должно быть меньше второго (${b}).`
@@ -419,12 +478,14 @@ bot.on("text", async (ctx) => {
     }
     if (step === Step.PageSize) {
         if (/^[1-9]\d*$/.test(text)) {
-            f.page_size = text;
+            s.page_size = text;
         } else {
             return ctx.reply("Необходимо ввести выводимых количество отзывов!");
         }
     }
     commentsFlowStep.set(chatId, step + 1);
+
+    s.isValChanges = true;
     return nextStep(ctx);
 });
 
@@ -434,36 +495,19 @@ bot.action(/page:(\d+)/, async (ctx) => {
     return fetchAndSend(ctx, page);
 });
 
-// Периодическое получение новых комментариев
 setInterval(async () => {
-    for (const [chatId, f] of userSettings.entries()) {
+    for (const [chatId, s] of userSettings.entries()) {
+        if (!s.subscribed) continue;
         try {
-            const params: GetCommentsReq = {
-                department_id: f.department_ids.join(","),
-                page: "1",
-                page_size: f.page_size,
-                created_at_after: formatDateLocal(new Date(f.lastChecked)),
-            };
-            const cont = await fetchJSON<CommentContainer>(getCommentsUrl(params));
-            for (const c of cont.results) {
-                await bot.telegram.sendMessage(
-                    chatId,
-                    `${c.restaurant.type_comments_loader}\n${"★".repeat(
-                        c.stars
-                    )}\nРесторан: ${c.restaurant.name}\nАвтор: ${c.name}\nДата: ${c.created_at.split("T")[0]
-                    }\n\n${c.text}`,
-                    c.profile_url
-                        ? Markup.inlineKeyboard([
-                            Markup.button.url("Отзыв", c.restaurant.review_url),
-                            Markup.button.url("Профиль автора", c.profile_url),
-                        ])
-                        : undefined
-                );
-            }
-            f.lastChecked = new Date().toISOString();
-        } catch (e) {
-            console.error("Polling error for", chatId, e);
-        }
+            await fetchAndSend(
+                {
+                    chat: { id: chatId },
+                    reply: () => { },
+                    answerCbQuery: () => { },
+                } as any,
+                1
+            );
+        } catch { }
     }
 }, CHECK_INTERVAL);
 
@@ -474,14 +518,11 @@ setInterval(async () => {
     const app = express();
     app.use(express.json());
     await bot.telegram.setWebhook(`${WEBHOOK_URL}/webhook`);
-    app.post("/webhook", (req, res) => {
+    app.post("/webhook", (req, res) =>
         bot
             .handleUpdate(req.body)
             .then(() => res.sendStatus(200))
-            .catch((e) => {
-                console.error(e);
-                res.sendStatus(500);
-            });
-    });
-    app.listen(PORT_NUM, () => console.log(`Listening on ${PORT_NUM}`));
+            .catch(() => res.sendStatus(500))
+    );
+    app.listen(PORT_NUM, () => console.log(`Listening ${PORT_NUM}`));
 })();
