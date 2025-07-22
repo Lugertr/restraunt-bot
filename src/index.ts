@@ -503,7 +503,7 @@ setInterval(async () => {
                     reply: () => { },
                     answerCbQuery: () => { },
                 } as any,
-                1
+                1, true
             );
         } catch { }
     }
@@ -515,6 +515,7 @@ setInterval(async () => {
     bot.launch();
     const app = express();
     app.use(express.json());
+    await bot.telegram.deleteWebhook();
     await bot.telegram.setWebhook(`${WEBHOOK_URL}/webhook`);
     app.post("/webhook", (req, res) =>
         bot
