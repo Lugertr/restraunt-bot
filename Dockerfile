@@ -5,8 +5,11 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig.json ./
 
-RUN npm ci --include=dev && \
-    npm run build
+RUN npm ci --include=dev
+
+COPY src ./src
+
+RUN npm run build
 
 FROM node:20-alpine
 
