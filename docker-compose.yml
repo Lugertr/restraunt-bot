@@ -1,9 +1,10 @@
 version: '3.8'
+
 services:
   bot:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: restaurant-bot
     env_file: .env.production
-    environment:
-      - NODE_ENV=production
     restart: unless-stopped

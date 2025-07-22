@@ -300,8 +300,6 @@ async function fetchAndSend(ctx: any, page: number, isIntervalReq?: boolean) {
         ...containers.map((c) => Math.ceil(c.count / Number(s.page_size)))
     );
     const nav = [];
-    console.log(pages);
-    console.log(containers);
     if (page > 1) nav.push(Markup.button.callback("⬅️", `page:${page - 1}`));
     if (page < pages) nav.push(Markup.button.callback("➡️", `page:${page + 1}`));
     if (nav.length) {
